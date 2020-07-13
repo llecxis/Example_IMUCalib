@@ -54,7 +54,7 @@ class CalibIMUs:
         upVec[upAxisIdx] = 1
         # calc arm rot in T-pose using the offset rot from stage 1
         # this will be a rotation relative to N_armImuAtGlob
-        # note that the order of multiplication is the opposite 
+        # note that the order of multiplication is the opposite
         T_armAtN_arm = self.__N_armImuAtGlob.inv() * T_armImuAtGlob
         
         # TODO: check that the rotation angle phi is close to 90 degrees:
