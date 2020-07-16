@@ -5,7 +5,7 @@ import socket
 import traceback
 # import network
 import os
-from scipy import interpolate
+# from scipy import interpolate
 
 from PyQt5 import QtGui
 from PyQt5.QtWidgets import *
@@ -15,7 +15,7 @@ from PyQt5.QtCore import *
 import vtk
 from vtk.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 
-import Worker as Worker
+import Worker
 import Draw
 import QtrCalc as QC
 from CP_Rotation import CP_Rotation as R
@@ -24,15 +24,9 @@ import CalibIMUsInQuat as CalibIMUs
 import Video_maker
 
 
-def get_files(directory):
-    files = os.listdir(directory)
-    for i in range(0,len(files)):
-        files[i] = directory + files[i]
-    return files
+class MainWindow(QMainWindow):
 
-class MainWindow(QMainWindow):   
-
-    NUM_THREADS = 7 # number of phones
+    NUM_THREADS = 5 # number of phones
     sig_abort = pyqtSignal()
     sig_abort_workers = pyqtSignal()
     sig_abort_cams = pyqtSignal()
@@ -48,14 +42,20 @@ class MainWindow(QMainWindow):
         self.num_workers = 0
         self.sens_data = {} #dictionary of dicts
         self.slider_end = 1
-        self.state = 0
+        self.state = -1
+        self.n_time = False
+        self.t_time = False
         self.directory = None
 
         self.rigth_list = [ 5559+2*i for i in range(self.NUM_THREADS)]
 
         mtxBnoAtVtk = np.array([[1,0,0], [0,0,-1], [0,1,0]])
+        
+        N_segmentAtBody = np.array([[1,0,0], [0,1,0], [0,0,1]])
 
         self.rotBnoAtVtk = R.from_matrix(mtxBnoAtVtk) #rotation from BNO FoR to VTK FoR
+
+        self.N_segmentAtBody = R.from_matrix(N_segmentAtBody)
         
         self.setWindowIcon(QtGui.QIcon("icon.png"))
         self.setWindowTitle(self.title)
@@ -109,37 +109,31 @@ class MainWindow(QMainWindow):
 
     def n_qtr_shift(self):
 
-        if (self.video_show == 1 ) and (self.flag_norm == 1): 
-            self.rot0 = self.qtrs[5563]
-            self.rot1 = self.qtrs[5571]
-            self.rot2 = self.qtrs[5569]
+        if (self.state == 0):                        
+            qtr=[1.0,0.0,0.0,0.0]
+            rot = {}
+            self.log_text.append('N calibration, t = ' + str(self.ti) )
+            # print(self.qtrs)
+            for port in self.qtrs['ports']:
+                rot[port] = self.rotBnoAtVtk*R.from_quat(self.qtrs[port])
+                self.log_text.append( str(port) + str(rot[port].as_quat()) )
 
-            temp_1 = self.qtrs[5571]
-            temp_2 = self.qtrs[5563]
-
-            # print(temp_2)
-            self.log_text.append( ' qtr5561 = ' + str(self.RqtrTovtkqtr(temp_1.as_quat())) )
-            self.log_text.append( ' qtr5563 = ' + str(self.RqtrTovtkqtr(temp_2.as_quat())) )
-
-            self.rotBox0AtIMU0 = self.rot0.inv()
-            self.rotBox1AtIMU1 = self.rot1.inv()
-            self.rotBox1AtIMU2 = self.rot2.inv()
+            if ('5563' in self.qtrs) == 0:
+                rot['5563'] = self.rotBnoAtVtk*R.from_quat(qtr)
+                self.qtrs['5563'] = qtr
+                # print(self.qtrs['5563'])
 
             self.iCalibStage = 1
-            print("\n\n\n====== STEP 1 ========\n\n\n")
-                    
-            # rot0 5563 - ref, rot1 5561 - arm
-            self.ci.setN_calibImusAtGlob(self.rot0, self.rot1)
-            self.ci.setN_calibImusAtGlob(self.rot0, self.rot2)
+            self.ci.setN_calibImusAtGlob(rot['5563'], rot['5571'])
 
-            # add arm as a segment 
-            self.ci.addSegmentImu(R.from_matrix(np.identity(3)), self.rot1)
-            self.ci.addSegmentImu(R.from_matrix(np.identity(3)), self.rot2)
+            for port in self.qtrs['ports']:
+                if (port != '5563'):
+                    self.ci.addSegmentImu(self.N_segmentAtBody, rot[port]) #FOR from visual anatomical
+            self.log_text.append('N calibration: done')
 
         if (self.state == 1):
             rot = {}
-            self.rotBox0AtIMU = {}
-            self.log_text.append('N calibration: ')
+            self.log_text.append('N calibration: ' + str(self.ti) )
             for port in self.vm.qtrs:
                 rot[port] = self.rotBnoAtVtk*R.from_quat(self.vm.frame[port][self.ti])
                 self.log_text.append( str(port) + str(rot[port].as_quat()) )
@@ -149,31 +143,50 @@ class MainWindow(QMainWindow):
 
             for port in self.vm.qtrs:
                 if (port != '5563'):                 
-                    self.ci.addSegmentImu(R.identity(), rot[port]) #FOR from visual anatomical
+                    self.ci.addSegmentImu(self.N_segmentAtBody, rot[port]) #FOR from visual anatomical
             self.log_text.append('N calibration: done')
 
     def t_qtr_shift(self):
-        rot = {}
-        # print(self.ti)
-        self.log_text.append('T calibration: ')
-        for port in self.vm.qtrs:
-            rot[port] = self.rotBnoAtVtk*R.from_quat(self.vm.frame[port][self.ti])
-            self.log_text.append( str(port) + str(rot[port].as_quat()))
 
-        self.iCalibStage = 2
-        self.ci.doCalibration(rot['5571'], 1, 2)
-        self.flag_norm = 1
-        self.log_text.append('T calibration: done')
-        self.log_text.append('Push \"Play\" button')
+        rot = {}
+        self.log_text.append('T calibration: ' + str(self.ti))
+        if (self.state == 0):
+            for port in self.qtrs['ports']:
+                rot[port] = self.rotBnoAtVtk*R.from_quat(self.qtrs[port])
+                self.log_text.append( str(port) + str(rot[port].as_quat()))
+
+            self.iCalibStage = 2
+            self.ci.doCalibration(rot['5571'], 1, 2)
+            self.flag_norm = 1
+            self.log_text.append('T calibration: done')
+            self.log_text.append('Push \"Play\" button')
+
+        if (self.state == 1):
+            for port in self.vm.qtrs:
+                rot[port] = self.rotBnoAtVtk*R.from_quat(self.vm.frame[port][self.ti])
+                self.log_text.append( str(port) + str(rot[port].as_quat()))
+
+            self.iCalibStage = 2
+            self.ci.doCalibration(rot['5571'], 1, 2)
+            self.flag_norm = 1
+            self.log_text.append('T calibration: done')
+            self.log_text.append('Push \"Play\" button')       
         
 
-
-    def calibrate(self, n_time = 400, t_time = 1996):
+    def calibrate(self):
         if self.state == 1:
+            n_time = 500
+            t_time = 1500
+
+            if not(self.t_time):
+                self.t_time = t_time
+
+            if not(self.n_time):
+                self.n_time = n_time
             
-            self.sld.setValue(n_time)
+            self.sld.setValue(self.n_time)
             self.n_qtr_shift()
-            self.sld.setValue(t_time)
+            self.sld.setValue(self.t_time)
             self.t_qtr_shift()
             self.sld.setValue(0)
 
@@ -194,8 +207,9 @@ class MainWindow(QMainWindow):
 
         return 0
 
-    def vtkCall(self):      
-        # self.play.setDisabled(True)
+    def vtkCall(self):
+        
+        self.play.setDisabled(True)
         # self.play.setText('Pause')
         # self.stop.setEnabled(True)
         self.timer.start(self.timeStep)
@@ -203,7 +217,7 @@ class MainWindow(QMainWindow):
 
     def vtkEndCall(self):
         # self.stop.setDisabled(True)
-        # self.play.setEnabled(True)
+        self.play.setEnabled(True)
         self.timer.stop()
         self.sld.setValue(0)
         # TODO: stop video recording
@@ -275,11 +289,12 @@ class MainWindow(QMainWindow):
         #Create vtk obj
         self.scene = Draw.vtpDrawScene()
         directory = 'geometry/'
-        obj = get_files(directory)
+        obj = [directory + el for el in os.listdir(directory)]
         rigth_list = ['geometry/hat_jaw.vtp', 'geometry/hat_skull.vtp', 'geometry/hat_spine.vtp', 'geometry/humerus.vtp', 'geometry/humerus_l.vtp', 'geometry/radius_lv.vtp', 'geometry/radius_rv.vtp', 'geometry/scapula.vtp', 'geometry/scapula_l.vtp', 'geometry/thorax.vtp', 'geometry/ulna_lv.vtp', 'geometry/ulna_rv.vtp']
-        rigth_list.append(list(set(obj) ^ set(rigth_list)))
+        if list(set(obj) ^ set(rigth_list)) != []:
+            rigth_list.append(list(set(obj) ^ set(rigth_list)))
         self.obj_list = rigth_list
-        self.ren = self.scene.initScene_qt(obj)
+        self.ren = self.scene.initScene_qt(self.obj_list)
         self.initial_qtr_norm()
         
 
@@ -302,8 +317,9 @@ class MainWindow(QMainWindow):
         self.sld = QSlider(Qt.Horizontal, self)
         self.sld.setFocusPolicy(Qt.NoFocus)
         self.sld.setGeometry(30, 40, 100, 30)
+        self.sld.setValue(0)
         self.sld.valueChanged[int].connect(self.changeValue)        
-        self.vl.addWidget(self.sld,2,1,2,1)  
+        self.vl.addWidget(self.sld,2,1,2,1)
            
 
         self.label = QLabel("time")
@@ -337,39 +353,41 @@ class MainWindow(QMainWindow):
                 for el in range(len(self.scene.modelActor)):
                     
                     temp_shift = np.array([0.,0.,0.])
-                    self.motion_flag = np.array([0,[1.,0.,0.,0.]])                
-                    temp_qtr =  self.ci.calcBodyAtGlob(self.rotBox0AtIMU1*self.qtrs[5563]) #* self.rotBox0AtIMU0                смена x и y- self.rotBnoAtVtk_norm                            калибровка self.rotBox0AtIMU0 * 
+                    self.motion_flag = np.array([0,[1.,0.,0.,0.]])
+                    temp_qtr =  self.ci.calcBodyAtGlob(self.rotBnoAtVtk*R.from_quat(self.qtrs['5563'])) #* self.rotBox0AtIMU0                смена x и y- self.rotBnoAtVtk_norm                            калибровка self.rotBox0AtIMU0 * 
                     
                     if (el == 4):
-                        temp_qtr_2 = self.ci.calcSegmentAtBody(0,self.rotBox0AtIMU1*self.qtrs[5571],temp_qtr)
-                        self.motion_flag =  [1, self.RqtrTovtkqtr(temp_qtr_2.as_quat())]
+                        temp_qtr_2 = self.ci.calcSegmentAtBody(0,self.rotBnoAtVtk*R.from_quat(self.qtrs['5571']),temp_qtr)
+                        self.motion_flag =  [1, temp_qtr_2.as_quat()]
 
-                    if (el == 5) or (el == 10):
-                        temp_qtr_2 = self.ci.calcSegmentAtBody(0,self.rotBox0AtIMU1*self.qtrs[5569],temp_qtr)
-                        temp_shift = self.shift_calculus(4,el,self.ci.calcSegmentAtBody(0,self.rotBox0AtIMU1*self.qtrs[5571],temp_qtr).as_matrix())
-                        self.motion_flag =  [1, self.RqtrTovtkqtr(temp_qtr_2.as_quat())]
+                    # if (el == 5) or (el == 10):
+                    #     temp_qtr_2 = self.ci.calcSegmentAtBody(0,self.qtrs[5569],temp_qtr)
+                    #     temp_shift = self.shift_calculus(4,el,self.ci.calcSegmentAtBody(0,self.qtrs[5571],temp_qtr).as_matrix())
+                    #     self.motion_flag =  [1, temp_qtr_2.as_quat()]
 
                     # if (el == 3):                   
-                    #     temp_qtr_2 = self.ci.calcSegmentAtBody(0,self.rotBox0AtIMU1*self.qtrs[5561],temp_qtr)
+                    #     temp_qtr_2 = self.ci.calcSegmentAtBody(0,self.qtrs[5561],temp_qtr)
                     #     self.motion_flag =  [1, self.RqtrTovtkqtr(temp_qtr_2.as_quat())]
 
                     # if (el == 6) or (el == 11):
-                    #     temp_qtr_2 = self.ci.calcSegmentAtBody(0,self.rotBox0AtIMU1*self.qtrs[5559],temp_qtr)
+                    #     temp_qtr_2 = self.ci.calcSegmentAtBody(0,self.qtrs[5559],temp_qtr)
                     #     temp_shift = self.shift_calculus(4,el,self.ci.calcSegmentAtBody(0,self.qtrs[5561],temp_qtr).as_matrix())
                     #     self.motion_flag =  [1, self.RqtrTovtkqtr(temp_qtr_2.as_quat())]
                     
-                    self.scene.SetRefQuatOrientation(self.RqtrTovtkqtr(temp_qtr.as_quat()), temp_shift, el, self.motion_flag )
+                    self.scene.SetRefQuatOrientation(np.array(temp_qtr.as_quat()), temp_shift, el, self.motion_flag )
 
                 self.iren.Render() 
 
             if  (self.state == 1) and (self.flag_norm == 1):
                 
                 if self.ti == self.slider_end:
-                    self.timer.stop()
+                    # self.timer.stop()
                     self.sld.setValue(0)
+                    self.play.setEnabled(True)
                     # self.play.setText('Play')
 
-                self.sld.setValue(self.sld.value() + 5)          
+                if not(self.play.isEnabled()):                    
+                    self.sld.setValue(self.sld.value() + 5)  
 
                 self.qtr63 = self.rotBnoAtVtk*R.from_quat(self.vm.frame['5563'][self.ti])
                 # self.qtr61 = self.rotBnoAtVtk*R.from_quat(self.vm.frame['5561'][self.ti]) # humerus_r
@@ -409,14 +427,14 @@ class MainWindow(QMainWindow):
             else:
                 pass
         except:
-            print("No worker", self.qtr63, self.qtr69, self.qtr71) 
+            print("No worker",temp_qtr) 
     
     def shift_calculus(self,i_from_actor,i_to_actor, matrix):
         return  np.array(self.scene.modelActor[i_from_actor].GetPosition()) - np.array(self.scene.modelActor[i_to_actor].GetPosition()) + np.array(matrix).dot(np.array(self.scene.initial_pos_actors[i_to_actor]) - np.array(self.scene.initial_pos_actors[i_from_actor]))
     
-    def RqtrTovtkqtr(self, qtr):
-        qtr = np.array([qtr[3],qtr[0],qtr[1],qtr[2]])
-        return qtr
+    # def RqtrTovtkqtr(self, qtr):
+    #     qtr = np.array([qtr[3],qtr[0],qtr[1],qtr[2]])
+    #     return qtr
 
     def initial_qtr_norm(self):
         self.n_pos_temp_qtr = np.array([0.95, 0., 0.25, 0.])
@@ -434,111 +452,46 @@ class MainWindow(QMainWindow):
         self.video_show = 0
         self.motion_flag = list()
     
-        
-    # def start_threads(self):
+    def start_threads(self):
 
-    #     self.__workers_done = 0
-    #     self.__threads = []
-    #     self.__threadsstatus = []
-    #     self.stat = []
-    #     self.qtrs = {}
-    #     self.qtrs['ports'] = []
-    #     self.qtrs_pure = {}
-    #     self.shifts = []
-    #     self.a = [0,1,2,3]
-    #     self.video_flag_on = 0
-   
-    #     broadcaster = network.Broadcaster()
-    #     thread = QThread()
-    #     thread.setObjectName('thread_' + str(0))
-    #     self.__threads.append((thread, broadcaster))  # need to store worker too otherwise will be gc'd
-    #     broadcaster.moveToThread(thread)
-    #     broadcaster.sig_status.connect(self.on_broadcaster_status)
-    #     broadcaster.sig_msg.connect(self.log_text.append)
-    #     broadcaster.sig_ports.connect(self.on_worker_port)
+        self.__workers_done = 0
+        self.__threads = []
+        self.__threadsstatus = []
+        self.stat = {}
+        self.qtrs = {}
+        self.qtrs_pure = {}
+        self.shifts = {}
+        self.qtrs['ports'] = []
+        # self.a = [0,1,2,3]
+        port = 5563
+        for idx in range(self.NUM_THREADS):
+            worker = Worker.Worker(idx, port)
+            thread = QThread()
+            thread.setObjectName('thread_' + str(idx))
+            self.__threads.append((thread, worker))  # need to store worker too otherwise will be gc'd
+            self.__threadsstatus.append(self.sensor_im_1) #нужно продумать как именно добавлять статусы многопоточности в виджите
+            self.stat[str(port)] = -1
+            # self.qtrs.append([1.,0.,0.,0.])
+            # self.shifts.append([0.,0.,0.])
+            worker.moveToThread(thread)
 
-    #     # control worker:
-    #     self.sig_abort.connect(broadcaster.abort)
+            worker.sig_shifts.connect(self.on_worker_shifts)
+            worker.sig_qtr.connect(self.on_worker_qtr)
+            worker.sig_status.connect(self.on_worker_status)
+            worker.sig_msg.connect(self.log_text.append)
 
-    #     # self.sig_start.connect(worker.work)  # needed due to PyCharm debugger bug (!); comment out next line
-    #     thread.started.connect(broadcaster.work) #(self.port)
-    #     thread.start()
-    #     self.log_text.append("Broadcaster started")
+            # control worker:
+            self.sig_abort_workers.connect(worker.abort)
 
-    # def start_threads(self):
-
-    #     self.__workers_done = 0
-    #     self.__threads = []
-    #     self.__threadsstatus = []
-    #     self.stat = []
-    #     self.qtrs = []
-    #     self.shifts = []
-    #     self.a = [0,1,2,3]
-    #     port = 5555
-    #     for idx in range(self.NUM_THREADS):
-    #         worker = Worker(idx, port)
-    #         thread = QThread()
-    #         thread.setObjectName('thread_' + str(idx))
-    #         self.__threads.append((thread, worker))  # need to store worker too otherwise will be gc'd
-    #         self.__threadsstatus.append(self.sensor_im_1) #нужно продумать как именно добавлять статусы многопоточности в виджите
-    #         self.stat.append(-1)
-    #         self.qtrs.append([1.,0.,0.,0.])
-    #         self.shifts.append([0.,0.,0.])
-    #         worker.moveToThread(thread)
-
-    #         worker.sig_shifts.connect(self.on_worker_shifts)
-    #         worker.sig_qtr.connect(self.on_worker_qtr)
-    #         worker.sig_status.connect(self.on_worker_status)
-    #         # worker.sig_msg.connect(self.log_text.append)
-
-    #         # control worker:
-    #         self.sig_abort_workers.connect(worker.abort)
-
-    #         # get read to start worker:
-    #         # self.sig_start.connect(worker.work)  # needed due to PyCharm debugger bug (!); comment out next line
-    #         thread.started.connect(worker.work) #(self.port)
-    #         port = port + 1
-    #         thread.start()  # this will emit 'started' and start thread event loop
-
-    @pyqtSlot(int, int, str)
-    def on_broadcaster_status(self, flag: int, port: int, ip: str):
-        if flag == 1:
-            if self.num_workers < self.NUM_THREADS:
-                d = { "port" : port, 'ip': ip }
-                self.WorkerAdress.append(d)
-                self.start_worker(self.num_workers, port, ip)
-                self.num_workers += 1
-            else:
-                pass
-        else:
-            print("flag : ", flag)
-
-    def start_worker(self, idx, port, ip):
+            # get read to start worker:
+            # self.sig_start.connect(worker.work)  # needed due to PyCharm debugger bug (!); comment out next line
+            thread.started.connect(worker.work) #(self.port)
+            # print(port)
+            port = port + 2
+            thread.start()  # this will emit 'started' and start thread event loop
             
-        worker = Worker.Worker(idx, port, ip, App) 
-        thread = QThread()
-        thread.setObjectName('thread_' + str(idx + 1))
-        self.__threads.append((thread, worker))  # need to store worker too otherwise will be gc'd
-        self.__threadsstatus.append(self.sensor_im_1) #нужно продумать как именно добавлять статусы многопоточности в виджите
-        self.stat.append(-1)
-        self.qtrs[port] = [1.,0.,0.,0.]
-        self.shifts.append([0.,0.,0.])
-        worker.moveToThread(thread)
-        
-        worker.sig_shifts.connect(self.on_worker_shifts)
-        worker.sig_qtr.connect(self.on_worker_qtr)
-        worker.sig_status.connect(self.on_worker_status)
-        worker.sig_msg.connect(self.log_text.append)
-        self.sig_abort_workers.connect(worker.abort)
-
-        # get read to start worker:
-        # self.sig_start.connect(worker.work)  # needed due to PyCharm debugger bug (!); comment out next line
-        thread.started.connect(worker.work) #(self.port)
-        thread.start()
-        self.log_text.append('Worker #' + str(idx) + ' started.') 
-
-    @pyqtSlot(int, list)
-    def on_worker_shifts(self, worker_id: int, data: list):
+    @pyqtSlot(str, list)
+    def on_worker_shifts(self, worker_id: str, data: list):
         # self.log_text.append('Worker #{}: {}'.format(worker_id, data))
         # self.progress.append('{}: {}'.format(worker_id, data))
         # print(data)
@@ -549,41 +502,31 @@ class MainWindow(QMainWindow):
         except:
             traceback.print_exc()
     
-    @pyqtSlot(int, list)
-    def on_worker_qtr(self, worker_id: int, data: list):
+    @pyqtSlot(str, list)
+    def on_worker_qtr(self, worker_id: str, data: list):
         try: 
             self.qtrs_pure[worker_id] = data
             # print(data)
-            self.qtrs[worker_id] = self.rotBnoAtVtk.inv() * R.from_quat(np.array([data[1],data[2],data[3],data[0]])) * self.rotBnoAtVtk #cicle(self,data) data # self.rotBnoAtVtk.inv()
+            self.qtrs[worker_id] = np.array(data) #cicle(self,data) data # self.rotBnoAtVtk.inv()
 
         except (KeyboardInterrupt, SystemExit):
             raise
         except:
             traceback.print_exc()
 
-    @pyqtSlot(int)
-    def on_worker_port(self, port: int):
-        try:  
-            if self.qtrs['ports'].count(port) == 0:
-                self.qtrs['ports'].append(port)
-
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except:
-            traceback.print_exc()
-
-    @pyqtSlot(int, int)
-    def on_worker_status(self, worker_id: int, flag: int):
+    @pyqtSlot(str, int)
+    def on_worker_status(self, worker_id: str, flag: int):
         if (self.stat[worker_id] == flag):
             pass
         elif (flag == 1):
             self.stat[worker_id] = flag
             self.sensor_im_1.setText('Active')
-            self.log_text.append('Sensor ' + str(worker_id) + ' is Active')
+            self.log_text.append('Sensor ' + worker_id + ' is Active')
+            self.qtrs['ports'].append(worker_id)
         else:
             self.stat[worker_id] = flag
             self.sensor_im_1.setText('Waiting')
-            self.log_text.append('Connect sensor # ' + str(worker_id) + '. Waiting...')
+            self.log_text.append('Connect sensor # ' + worker_id + '. Waiting...')
         self.__workers_done += 1
 
     @pyqtSlot()
@@ -641,31 +584,46 @@ class MainWindow(QMainWindow):
 
         sensorsWidget = QWidget(self)
 
-        self.sensor_im_1 = QLabel(sensorsWidget)
-        self.sensor_im_1.setText("Image_1")
-        self.sensor_im_2 = QLabel(sensorsWidget)
-        self.sensor_im_2.setText("Image_2")
-        self.sensor_im_3 = QLabel(sensorsWidget)
-        self.sensor_im_3.setText("Image_3")
+        self.sensor_im_1 = QLabel()
+        self.sensor_im_1.setText("No data")
+        # self.sensor_im_2 = QLabel()
+        # self.sensor_im_2.setText("Image_2")
+        # self.sensor_im_3 = QLabel()
+        # self.sensor_im_3.setText("Image_3")
 
-        sensorsHBox = QHBoxLayout()
-        sensorsHBox.addWidget(self.sensor_im_1)
-        sensorsHBox.addWidget(self.sensor_im_2)
-        sensorsHBox.addWidget(self.sensor_im_3)
+        # sensorsHBox = QHBoxLayout()
+        # sensorsHBox.addWidget(self.sensor_im_1)
+        # sensorsHBox.addWidget(self.sensor_im_2)
+        # sensorsHBox.addWidget(self.sensor_im_3)
 
-        namesHBox = QHBoxLayout()
-        namesHBox.addWidget(QLabel("phone_1", sensorsWidget))
-        namesHBox.addWidget(QLabel("phone_2", sensorsWidget))
-        namesHBox.addWidget(QLabel("phone_3", sensorsWidget))
+        flo = QFormLayout()
+        e1 = QLineEdit()
+        e2 = QLineEdit()
+        e1.textChanged.connect(self.textchanged_1)
+        e2.textChanged.connect(self.textchanged_2)
 
-        vBox = QVBoxLayout()
-        vBox.addLayout(sensorsHBox)
-        vBox.addLayout(namesHBox)
+        flo.addRow("N calibration", e1)
+        flo.addRow("T calibration", e2)
+        flo.addRow("Phones",self.sensor_im_1)
 
-        sensorsWidget.setLayout(vBox)
+        # namesHBox = QHBoxLayout()
+        # namesHBox.addWidget(e4)
+        # namesHBox.addWidget(QLabel("phone_2", sensorsWidget))
+        # namesHBox.addWidget(QLabel("phone_3", sensorsWidget))
+
+        # vBox = QVBoxLayout()
+        # vBox.Layout(flo)
+
+        sensorsWidget.setLayout(flo)
         
         self.sensors.setWidget(sensorsWidget)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.sensors)
+
+    def textchanged_1(self,text):
+        self.n_time = int(text)
+    
+    def textchanged_2(self,text):
+        self.t_time = int(text)
 
     def setDirectoryToExplorer(self, directory):
         model = QFileSystemModel()
@@ -707,6 +665,7 @@ class MainWindow(QMainWindow):
 
     def change_state_0(self):
         self.state = 0
+        self.start_threads()
         self.log_text.append('State: Recording')
         self.log_text.append('Waiting for sensors')
         
@@ -766,8 +725,8 @@ class MainWindow(QMainWindow):
         if (self.ip != host_ip):
             self.ip = host_ip
             self.log_text.append('To connect IP : ' + str(host_ip) )
-            self.log_text.append('Start from port: 5555')
-            self.log_text.append('State: Recording')
+            self.log_text.append('Start from port: 5563')
+            self.log_text.append('Choose the state')
 
 global App
 if __name__ == "__main__":
